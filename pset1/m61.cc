@@ -43,20 +43,36 @@ m61_memory_buffer::~m61_memory_buffer() {
 ///    return either `nullptr` or a pointer to a unique allocation.
 ///    The allocation request was made at source code location `file`:`line`.
 
+
+static m61_statistics gstats = {
+    .nactive = 0,
+    .active_size = 0,
+    .ntotal = 0,
+    .total_size = 0,
+    .nfail = 0,
+    .fail_size = 0,
+    .heap_min = 0,
+    .heap_max = 0
+};
+
 void* m61_malloc(size_t sz, const char* file, int line) {
     (void) file, (void) line;   // avoid uninitialized variable warnings
     // Your code here.
+    gstats.total_size += sz; // Update total allocation size
+    ++gstats.ntotal;
+
     if (default_buffer.pos + sz > default_buffer.size) {
         // Not enough space left in default buffer for allocation
+        ++gstats.nfail;
+        gstats.fail_size += sz; // Update fail_size with the requested size.
         return nullptr;
     }
 
-    // Otherwise there is enough space; claim the next `sz` bytes
+    // Otherwise, there is enough space; claim the next `sz` bytes
     void* ptr = &default_buffer.buffer[default_buffer.pos];
     default_buffer.pos += sz;
     return ptr;
 }
-
 
 /// m61_free(ptr, file, line)
 ///    Frees the memory allocation pointed to by `ptr`. If `ptr == nullptr`,
@@ -66,6 +82,7 @@ void* m61_malloc(size_t sz, const char* file, int line) {
 
 void m61_free(void* ptr, const char* file, int line) {
     // avoid uninitialized variable warnings
+    ++gstats.nactive;
     (void) ptr, (void) file, (void) line;
     // Your code here. The handout code does nothing!
 }
@@ -92,11 +109,7 @@ void* m61_calloc(size_t count, size_t sz, const char* file, int line) {
 ///    Return the current memory statistics.
 
 m61_statistics m61_get_statistics() {
-    // Your code here.
-    // The handout code sets all statistics to enormous numbers.
-    m61_statistics stats;
-    memset(&stats, 255, sizeof(m61_statistics));
-    return stats;
+    return gstats;
 }
 
 
