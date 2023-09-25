@@ -35,8 +35,6 @@ m61_memory_buffer::~m61_memory_buffer() {
 }
 
 
-
-
 /// m61_malloc(sz, file, line)
 ///    Returns a pointer to `sz` bytes of freshly-allocated dynamic memory.
 ///    The memory is not initialized. If `sz == 0`, then m61_malloc may
