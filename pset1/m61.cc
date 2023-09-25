@@ -51,26 +51,39 @@ static m61_statistics gstats = {
     .total_size = 0,
     .nfail = 0,
     .fail_size = 0,
-    .heap_min = 0,
+    .heap_min = SIZE_MAX,
     .heap_max = 0
 };
 
 void* m61_malloc(size_t sz, const char* file, int line) {
     (void) file, (void) line;   // avoid uninitialized variable warnings
-    // Your code here.
-    gstats.total_size += sz; // Update total allocation size
-    ++gstats.ntotal;
-
-    if (default_buffer.pos + sz > default_buffer.size) {
-        // Not enough space left in default buffer for allocation
+    // Track memory allocation statistics
+    if (default_buffer.pos + sz > default_buffer.size || default_buffer.pos + sz < default_buffer.pos) {
+        // Not enough space left in default buffer for allocation or sz is too large
         ++gstats.nfail;
         gstats.fail_size += sz; // Update fail_size with the requested size.
         return nullptr;
     }
 
+    // Update heap_min and heap_max
+    uintptr_t allocation_address = (uintptr_t)default_buffer.buffer + default_buffer.pos;
+    if (gstats.heap_min > allocation_address)
+        gstats.heap_min = allocation_address;
+    if (gstats.heap_max < allocation_address + sz)
+        gstats.heap_max = allocation_address + sz;
+
     // Otherwise, there is enough space; claim the next `sz` bytes
     void* ptr = &default_buffer.buffer[default_buffer.pos];
     default_buffer.pos += sz;
+
+    // Track active allocations
+    ++gstats.nactive;
+    gstats.active_size += sz;
+
+    // Update total allocation size after a successful allocation
+    gstats.total_size += sz;
+    ++gstats.ntotal;
+
     return ptr;
 }
 
@@ -81,10 +94,19 @@ void* m61_malloc(size_t sz, const char* file, int line) {
 ///    `file`:`line`.
 
 void m61_free(void* ptr, const char* file, int line) {
-    // avoid uninitialized variable warnings
-    ++gstats.nactive;
-    (void) ptr, (void) file, (void) line;
-    // Your code here. The handout code does nothing!
+    if (ptr == nullptr) {
+        return; // Do nothing if ptr is nullptr
+    }
+
+    // Calculate the size of the allocation being freed
+    size_t sz = default_buffer.pos - ((char*)ptr - default_buffer.buffer);
+
+    // Track memory deallocation statistics
+    --gstats.nactive;
+    gstats.active_size -= sz;
+
+    // Rest of your m61_free implementation
+    (void) file, (void) line;
 }
 
 
@@ -96,10 +118,18 @@ void m61_free(void* ptr, const char* file, int line) {
 ///    also return `nullptr` if `count == 0` or `size == 0`.
 
 void* m61_calloc(size_t count, size_t sz, const char* file, int line) {
-    // Your code here (not needed for first tests).
-    void* ptr = m61_malloc(count * sz, file, line);
+    // Calculate the total size required for calloc
+    size_t total_size = count * sz;
+
+    // Check for potential overflow
+    if (count != 0 && sz != 0 && total_size / sz != count) {
+        ++gstats.nfail;
+        return nullptr;
+    }
+
+    void* ptr = m61_malloc(total_size, file, line);
     if (ptr) {
-        memset(ptr, 0, count * sz);
+        memset(ptr, 0, total_size);
     }
     return ptr;
 }
