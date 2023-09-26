@@ -55,8 +55,23 @@ static m61_statistics gstats = {
     .heap_min = SIZE_MAX,
     .heap_max = 0
 };
+
+static void coalesce_freed_allocations() {
+    for (auto it = freed_allocations.begin(); it != freed_allocations.end(); ++it) {
+        auto next_it = std::next(it);
+
+        if (next_it != freed_allocations.end()) {
+            // Check if the current and next freed allocations are adjacent
+            if ((char*)it->first + it->second == next_it->first) {
+                it->second += next_it->second; // Merge them
+                freed_allocations.erase(next_it);
+            }
+        }
+    }
+}
+
 void* m61_malloc(size_t sz, const char* file, int line) {
-    (void)file, (void)line; // Avoid uninitialized variable warnings
+    (void) file, (void) line;   // Avoid uninitialized variable warnings
 
     // Try to find a suitable freed allocation
     for (auto it = freed_allocations.begin(); it != freed_allocations.end(); ++it) {
@@ -66,6 +81,12 @@ void* m61_malloc(size_t sz, const char* file, int line) {
 
             // Track active allocations
             active_allocations[ptr] = sz;
+
+            // Update total allocation size after a successful allocation
+            if (ptr != nullptr) {
+                gstats.total_size += sz;
+                ++gstats.ntotal;
+            }
 
             // Update heap_min and heap_max
             uintptr_t allocation_address = (uintptr_t)ptr;
@@ -84,7 +105,7 @@ void* m61_malloc(size_t sz, const char* file, int line) {
 
     // If no suitable freed allocation is found, proceed with a new allocation
     if (default_buffer.pos + sz > default_buffer.size || default_buffer.pos + sz < default_buffer.pos) {
-        // Not enough space left in the default buffer for allocation or sz is too large
+        // Not enough space left in default buffer for allocation or sz is too large
         ++gstats.nfail;
         gstats.fail_size += sz; // Update fail_size with the requested size.
         return nullptr;
@@ -97,6 +118,12 @@ void* m61_malloc(size_t sz, const char* file, int line) {
     // Track active allocations
     active_allocations[ptr] = sz;
 
+    // Update total allocation size after a successful allocation
+    if (ptr != nullptr) {
+        gstats.total_size += sz;
+        ++gstats.ntotal;
+    }
+
     // Update heap_min and heap_max
     uintptr_t allocation_address = (uintptr_t)ptr;
     if (gstats.heap_min > allocation_address)
@@ -106,52 +133,48 @@ void* m61_malloc(size_t sz, const char* file, int line) {
 
     // Track memory allocation statistics
     ++gstats.nactive;
-    gstats.total_size += sz; // Update total_size with the requested size.
-    gstats.active_size += sz; // Update active_size with the requested size.
-    ++gstats.ntotal;
+    gstats.active_size += sz;
 
     return ptr;
 }
 
 
-static void coalesce_freed_allocations() {
-    for (auto it = freed_allocations.begin(); it != freed_allocations.end(); ++it) {
-        auto next_it = std::next(it);
-
-        if (next_it != freed_allocations.end()) {
-            // Check if the current and next freed allocations are adjacent
-            if ((char*)it->first + it->second == next_it->first) {
-                it->second += next_it->second; // Merge them
-                freed_allocations.erase(next_it);
-            }
-        }
-    }
-}
-
+/// m61_free(ptr, file, line)
+///    Frees the memory allocation pointed to by `ptr`. If `ptr == nullptr`,
+///    does nothing. Otherwise, `ptr` must point to a currently active
+///    allocation returned by `m61_malloc`. The free was called at location
+///    `file`:`line`.
 
 void m61_free(void* ptr, const char* file, int line) {
     if (ptr == nullptr) {
         return; // Do nothing if ptr is nullptr
     }
 
-    // Calculate the size of the allocation being freed directly
-    size_t sz = active_allocations[ptr];
+    // Check if the pointer is in the active_allocations map
+    if (active_allocations.find(ptr) != active_allocations.end()) {
+        // Calculate the size of the allocation being freed
+        size_t sz = active_allocations[ptr];
 
-    // Remove the freed allocation from active_allocations
-    active_allocations.erase(ptr);
+        // Remove the allocation from active_allocations
+        active_allocations.erase(ptr);
 
-    // Add the freed allocation to freed_allocations
-    freed_allocations[ptr] = sz;
+        // Add the freed allocation to freed_allocations
+        freed_allocations[ptr] = sz;
 
-    // Track memory deallocation statistics
-    gstats.active_size -= sz;
-    --gstats.nactive;
+        // Track memory deallocation statistics
+        --gstats.nactive;
+        gstats.active_size -= sz;
 
-    // Call coalesce function after each free
-    coalesce_freed_allocations();
+        // Call coalesce function after each free
+        coalesce_freed_allocations();
 
-    // Rest of your m61_free implementation
-    (void)file, (void)line;
+        // Rest of your m61_free implementation
+        (void) file, (void) line;
+    } else {
+        // The pointer is not in active_allocations; this is an error
+        fprintf(stderr, "Error: Attempted to free a pointer not returned by m61_malloc\n");
+        exit(EXIT_FAILURE);
+    }
 }
 
 /// m61_calloc(count, sz, file, line)
