@@ -1,3 +1,4 @@
+
 #include "m61.hh"
 #include <cstdlib>
 #include <cstddef>
@@ -7,6 +8,12 @@
 #include <cassert>
 #include <sys/mman.h>
 #include <map>
+#include <list> // Include this to resolve the error
+
+
+struct m61_metadata {
+    size_t size;
+};
 
 
 struct m61_memory_buffer {
@@ -18,9 +25,12 @@ struct m61_memory_buffer {
     ~m61_memory_buffer();
 };
 
+
+
 static m61_memory_buffer default_buffer;
 static std::map<void*, size_t> freed_allocations;
 static std::map<void*, size_t> active_allocations;
+static std::list<std::pair<void*, size_t>> free_blocks;
 
 
 m61_memory_buffer::m61_memory_buffer() {
@@ -37,14 +47,6 @@ m61_memory_buffer::~m61_memory_buffer() {
     munmap(this->buffer, this->size);
 }
 
-
-/// m61_malloc(sz, file, line)
-///    Returns a pointer to `sz` bytes of freshly-allocated dynamic memory.
-///    The memory is not initialized. If `sz == 0`, then m61_malloc may
-///    return either `nullptr` or a pointer to a unique allocation.
-///    The allocation request was made at source code location `file`:`line`.
-
-
 static m61_statistics gstats = {
     .nactive = 0,
     .active_size = 0,
@@ -55,6 +57,7 @@ static m61_statistics gstats = {
     .heap_min = SIZE_MAX,
     .heap_max = 0
 };
+
 
 static void coalesce_freed_allocations() {
     auto it = freed_allocations.begin();
@@ -75,71 +78,66 @@ static void coalesce_freed_allocations() {
     }
 }
 
-
-void* m61_malloc(size_t sz, const char* file, int line) {
-    (void) file, (void) line;   // Avoid uninitialized variable warnings
-
-    // Try to find a suitable freed allocation
-    for (auto it = freed_allocations.begin(); it != freed_allocations.end(); ++it) {
-        if (it->second >= sz) {
-            void* ptr = it->first;
-            freed_allocations.erase(it);
-
-            // Track active allocations
-            active_allocations[ptr] = sz;
-
-            // Update total allocation size after a successful allocation
-            if (ptr != nullptr) {
-                gstats.total_size += sz;
-                ++gstats.ntotal;
-            }
-
-            // Update heap_min and heap_max
-            uintptr_t allocation_address = (uintptr_t)ptr;
-            if (gstats.heap_min > allocation_address)
-                gstats.heap_min = allocation_address;
-            if (gstats.heap_max < allocation_address + sz)
-                gstats.heap_max = allocation_address + sz;
-
-            // Track memory allocation statistics
-            ++gstats.nactive;
-            gstats.active_size += sz;
-
-            return ptr;
-        }
+// Helper function to check contents preservation
+void check_contents_preservation() {
+    for (auto it = active_allocations.begin(); it != active_allocations.end(); ++it) {
+        char* ptr = (char*)it->first;
+        size_t sz = it->second;
+        assert(memcmp(ptr, default_buffer.buffer + (ptr - default_buffer.buffer), sz) == 0);
     }
-
-    // If no suitable freed allocation is found, proceed with a new allocation
-    if (default_buffer.pos + sz > default_buffer.size || default_buffer.pos + sz < default_buffer.pos) {
-        // Not enough space left in default buffer for allocation or sz is too large
+}
+void* m61_malloc(size_t sz, const char* file, int line) {
+    (void)file, (void)line;   // Avoid uninitialized variable warnings
+    
+    const size_t padding_size = 8; // for detecting wild writes
+    size_t total_size = sizeof(m61_metadata) + sz + padding_size;
+    
+    // Check for overflow conditions
+    if (sz == 0 || total_size < sz || (default_buffer.pos + total_size) < total_size) {
         ++gstats.nfail;
-        gstats.fail_size += sz; // Update fail_size with the requested size.
+        gstats.fail_size += sz;
         return nullptr;
     }
 
-    // Otherwise, there is enough space; claim the next `sz` bytes
-    void* ptr = &default_buffer.buffer[default_buffer.pos];
-    default_buffer.pos += sz;
+    // Check if space is available in the buffer
+    if (default_buffer.pos + total_size > default_buffer.size) {
+        ++gstats.nfail;
+        gstats.fail_size += sz;
+        return nullptr;
+    }
 
+    m61_metadata* metadata = reinterpret_cast<m61_metadata*>(&default_buffer.buffer[default_buffer.pos]);
+    metadata->size = sz; // Store size in metadata
+    char* ptr = reinterpret_cast<char*>(metadata + 1);
+    default_buffer.pos += total_size;
+
+    memset(ptr + sz, 'B', padding_size); // Initialize padding bytes.
+    
+    // Ensure there is only one active allocation
+    static bool active_allocation = false;
+    if (active_allocation) {
+        fprintf(stderr, "MEMORY BUG: %s:%d: detected multiple active allocations\n", file, line);
+        exit(EXIT_FAILURE);
+    }
+    active_allocation = true;
+    
     // Track active allocations
     active_allocations[ptr] = sz;
 
-    // Update total allocation size after a successful allocation
-    if (ptr != nullptr) {
-        gstats.total_size += sz;
-        ++gstats.ntotal;
-    }
-
-    // Update heap_min and heap_max
-    uintptr_t allocation_address = (uintptr_t)ptr;
-    if (gstats.heap_min > allocation_address)
-        gstats.heap_min = allocation_address;
-    if (gstats.heap_max < allocation_address + sz)
-        gstats.heap_max = allocation_address + sz;
-
-    // Track memory allocation statistics
+    // Update statistics
+    gstats.total_size += sz;
+    ++gstats.ntotal;
     ++gstats.nactive;
     gstats.active_size += sz;
+    
+    uintptr_t allocation_address = (uintptr_t)ptr;
+    if (gstats.heap_min > allocation_address) gstats.heap_min = allocation_address;
+    if (gstats.heap_max < allocation_address + sz) gstats.heap_max = allocation_address + sz;
+    
+    check_contents_preservation();
+
+    // Reset active allocation state when successful
+    active_allocation = false;
 
     return ptr;
 }
@@ -149,45 +147,51 @@ void* m61_malloc(size_t sz, const char* file, int line) {
 ///    Frees the memory allocation pointed to by `ptr`. If `ptr == nullptr`,
 ///    does nothing. Otherwise, `ptr` must point to a currently active
 ///    allocation returned by `m61_malloc`. The free was called at location
-///    `file`:`line`.
 void m61_free(void* ptr, const char* file, int line) {
     if (ptr == nullptr) {
-        return; // Do nothing if ptr is nullptr
-    }
-
-    // Check if the pointer is in active_allocations map
-    auto it = active_allocations.find(ptr);
-    if (it != active_allocations.end()) {
-        // Calculate the size of the allocation being freed
-        size_t sz = it->second;
-
-        // Remove the allocation from active_allocations
-        active_allocations.erase(it);
-
-        // Add the freed allocation to freed_allocations
-        freed_allocations[ptr] = sz;
-
-        // Track memory deallocation statistics
-        --gstats.nactive;
-        gstats.active_size -= sz;
-
-        // Call coalesce function after each free
-        coalesce_freed_allocations();
         return;
-    } else if ((uintptr_t)ptr < (uintptr_t)default_buffer.buffer || (uintptr_t)ptr >= (uintptr_t)default_buffer.buffer + default_buffer.size) {
-        // The pointer is not in active_allocations and not in the default buffer; this is an error
-        fprintf(stderr, "MEMORY BUG: %s:%d: invalid free of pointer %p, not in heap\n", file, line, ptr);
-        exit(EXIT_FAILURE);
-    } else if (freed_allocations.find(ptr) != freed_allocations.end()) {
-        // The pointer is in freed_allocations (double free detected)
-        fprintf(stderr, "MEMORY BUG???: invalid free of pointer %p, double free\n", ptr);
-        exit(EXIT_FAILURE);
-    } else {
-        // The pointer is in the default buffer but not allocated
-        fprintf(stderr, "MEMORY BUG: %s:%d: invalid free of pointer %p, not allocated\n", file, line, ptr);
-        exit(EXIT_FAILURE);
     }
+
+    auto it = active_allocations.find(ptr);
+    if (it == active_allocations.end()) {
+        // Check if the pointer is not in active_allocations and not in the default buffer
+        if ((uintptr_t)ptr < (uintptr_t)default_buffer.buffer || (uintptr_t)ptr >= (uintptr_t)default_buffer.buffer + default_buffer.size) {
+            // The pointer is not in active_allocations and not in the default buffer; this is an error
+            fprintf(stderr, "MEMORY BUG: %s:%d: invalid free of pointer %p, not in heap\n", file, line, ptr);
+            exit(EXIT_FAILURE);
+        } else if (freed_allocations.find(ptr) != freed_allocations.end()) {
+            // The pointer is in freed_allocations (double free detected)
+            fprintf(stderr, "MEMORY BUG???: invalid free of pointer %p, double free\n", ptr);
+            exit(EXIT_FAILURE);
+        } else {
+            // The pointer is in the default buffer but not allocated
+            fprintf(stderr, "MEMORY BUG: %s:%d: invalid free of pointer %p, not allocated\n", file, line, ptr);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Extracting metadata and size.
+    m61_metadata* metadata = reinterpret_cast<m61_metadata*>(ptr) - 1;
+    size_t sz = metadata->size;
+
+    // Check padding bytes for boundary write errors.
+    char* data_ptr = reinterpret_cast<char*>(ptr);
+    for (size_t i = 0; i < 8; i++) {
+        if (data_ptr[sz + i] != 'B') {
+            fprintf(stderr, "MEMORY BUG: %s:%d: detected wild write during free of pointer %p\n", file, line, ptr);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    active_allocations.erase(it);
+    freed_allocations[ptr] = sz;
+
+    --gstats.nactive;
+    gstats.active_size -= sz;
+    
+    coalesce_freed_allocations();
 }
+
 
 
 /// m61_calloc(count, sz, file, line)
