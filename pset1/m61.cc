@@ -164,14 +164,6 @@ void m61_free(void* ptr, const char* file, int line) {
         // Remove the allocation from active_allocations
         active_allocations.erase(it);
 
-        // Check if the pointer is in freed_allocations (double free detection)
-        auto freed_it = freed_allocations.find(ptr);
-        if (freed_it != freed_allocations.end()) {
-            // Double free detected
-            fprintf(stderr, "MEMORY BUG???: invalid free of pointer %p, double free\n", ptr);
-            exit(EXIT_FAILURE);
-        }
-
         // Add the freed allocation to freed_allocations
         freed_allocations[ptr] = sz;
 
@@ -181,18 +173,21 @@ void m61_free(void* ptr, const char* file, int line) {
 
         // Call coalesce function after each free
         coalesce_freed_allocations();
+        return;
     } else if ((uintptr_t)ptr < (uintptr_t)default_buffer.buffer || (uintptr_t)ptr >= (uintptr_t)default_buffer.buffer + default_buffer.size) {
         // The pointer is not in active_allocations and not in the default buffer; this is an error
-        fprintf(stderr, "MEMORY BUG???: invalid free of pointer %p, not in heap\n", ptr);
+        fprintf(stderr, "MEMORY BUG: %s:%d: invalid free of pointer %p, not in heap\n", file, line, ptr);
         exit(EXIT_FAILURE);
-    } else {
+    } else if (freed_allocations.find(ptr) != freed_allocations.end()) {
         // The pointer is in freed_allocations (double free detected)
         fprintf(stderr, "MEMORY BUG???: invalid free of pointer %p, double free\n", ptr);
         exit(EXIT_FAILURE);
+    } else {
+        // The pointer is in the default buffer but not allocated
+        fprintf(stderr, "MEMORY BUG: %s:%d: invalid free of pointer %p, not allocated\n", file, line, ptr);
+        exit(EXIT_FAILURE);
     }
 }
-
-
 
 
 /// m61_calloc(count, sz, file, line)
