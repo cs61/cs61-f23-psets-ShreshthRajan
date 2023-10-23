@@ -49,6 +49,10 @@ void memshow();
 
 static void process_setup(pid_t pid, const char* program_name);
 
+// kernel_start(command)
+//    Initialize the hardware and processes and start running. The `command`
+//    string is an optional string passed from the boot loader.
+
 void kernel_start(const char* command) {
     // initialize hardware
     init_hardware();
@@ -67,7 +71,11 @@ void kernel_start(const char* command) {
             // nullptr is inaccessible even to the kernel
             perm = 0;
         }
-        // install identity mapping
+        // Install identity mapping for console memory
+        if (addr == CONSOLE_ADDR) {
+            perm = PTE_P | PTE_W | PTE_U;
+        }
+        // Modify memory mapping to make kernel memory inaccessible to applications
         int r = vmiter(kernel_pagetable, addr).try_map(addr, perm);
         assert(r == 0); // mappings during kernel_start MUST NOT fail
                         // (Note that later mappings might fail!!)
@@ -93,6 +101,7 @@ void kernel_start(const char* command) {
     // switch to first process using run()
     run(&ptable[1]);
 }
+
 
 
 // kalloc(sz)
@@ -351,6 +360,11 @@ uintptr_t syscall(regstate* regs) {
 //    in `u-lib.hh` (but in the handout code, it does not).
 
 int syscall_page_alloc(uintptr_t addr) {
+    // Check if the requested address is within the user address space
+    if (addr < PROC_START_ADDR) {
+        return -1; // Invalid address, cannot allocate kernel memory
+    }
+
     assert(physpages[addr / PAGESIZE].refcount == 0);
     ++physpages[addr / PAGESIZE].refcount;
     memset((void*) addr, 0, PAGESIZE);
