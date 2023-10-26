@@ -66,18 +66,22 @@ void kernel_start(const char* command) {
 
     // (re-)initialize kernel page table
     for (uintptr_t addr = 0; addr < MEMSIZE_PHYSICAL; addr += PAGESIZE) {
-        int perm = PTE_P | PTE_W | PTE_U;
-        if (addr == 0) {
-            // nullptr is inaccessible even to the kernel
-            perm = 0;
-        }
-        // Install identity mapping for console memory
-        if (addr == CONSOLE_ADDR) {
+        int perm;
+        if (addr >= PROC_START_ADDR || addr == CONSOLE_ADDR) {
+            // Only user-accessible if address is greater than PROC_START_ADDR or CONSOLE_ADDR
             perm = PTE_P | PTE_W | PTE_U;
         }
-        // Modify memory mapping to make kernel memory inaccessible to applications
+        else
+        {
+            perm = PTE_P | PTE_W;
+        }
+        // Make Nullptr inaccessble
+        if (addr == 0) {
+            perm = 0;
+        }
+        // identity mapping
         int r = vmiter(kernel_pagetable, addr).try_map(addr, perm);
-        assert(r == 0); // mappings during kernel_start MUST NOT fail
+        assert(r == 0);  // mappings during kernel_start MUST NOT fail
                         // (Note that later mappings might fail!!)
     }
 
@@ -167,33 +171,56 @@ void kfree(void* kptr) {
 //    This loads the application's code and data into memory, sets its
 //    %rip and %rsp, gives it a stack page, and marks it as runnable.
 
-void process_setup(pid_t pid, const char* program_name) {
+void process_setup(pid_t pid, const char *program_name)
+{
     init_process(&ptable[pid], 0);
 
     // initialize process page table
-    ptable[pid].pagetable = kernel_pagetable;
+    ptable[pid].pagetable = kalloc_pagetable();
+
+    // Copy mappings from kernel_pagetable to process pagetable
+    vmiter proc(ptable[pid].pagetable, 0);
+    vmiter kern(kernel_pagetable, 0);
+    for (; kern.va() < PROC_START_ADDR; kern += PAGESIZE, proc += PAGESIZE)
+    {
+        if (kern.present())
+        {
+            // Copy mappings/permissions over
+            proc.map(kern.pa(), kern.perm());
+        }
+    }
+
+    void *phys;
 
     // obtain reference to program image
     // (The program image models the process executable.)
     program_image pgm(program_name);
 
     // allocate and map process memory as specified in program image
-    for (auto seg = pgm.begin(); seg != pgm.end(); ++seg) {
+    for (auto seg = pgm.begin(); seg != pgm.end(); ++seg)
+    {
         for (uintptr_t a = round_down(seg.va(), PAGESIZE);
              a < seg.va() + seg.size();
-             a += PAGESIZE) {
+             a += PAGESIZE)
+        {
             // `a` is the process virtual address for the next code or data page
             // (The handout code requires that the corresponding physical
             // address is currently free.)
-            assert(physpages[a / PAGESIZE].refcount == 0);
-            ++physpages[a / PAGESIZE].refcount;
+
+            phys = kalloc(PAGESIZE);
+
+            // Map the physical address to this virtual address
+            vmiter it(ptable[pid].pagetable, a);
+            it.map(phys, PTE_P | PTE_W | PTE_U);
         }
     }
 
     // copy instructions and data from program image into process memory
-    for (auto seg = pgm.begin(); seg != pgm.end(); ++seg) {
-        memset((void*) seg.va(), 0, seg.size());
-        memcpy((void*) seg.va(), seg.data(), seg.data_size());
+    for (auto seg = pgm.begin(); seg != pgm.end(); ++seg)
+    {
+        void *new_phys = (void *)vmiter(ptable[pid].pagetable, seg.va()).pa();
+        memset(new_phys, 0, seg.size());
+        memcpy(new_phys, seg.data(), seg.data_size());
     }
 
     // mark entry point
@@ -201,18 +228,20 @@ void process_setup(pid_t pid, const char* program_name) {
 
     // allocate and map stack segment
     // Compute process virtual address for stack page
-    uintptr_t stack_addr = PROC_START_ADDR + PROC_SIZE * pid - PAGESIZE;
+    // Utilize all virtual memory
+    uintptr_t stack_addr = MEMSIZE_VIRTUAL - PAGESIZE;
+    phys = kalloc(PAGESIZE);
+    // Map the physical address to this virtual address
+    vmiter it(ptable[pid].pagetable, stack_addr);
+    it.map(phys, PTE_P | PTE_W | PTE_U);
     // The handout code requires that the corresponding physical address
     // is currently free.
-    assert(physpages[stack_addr / PAGESIZE].refcount == 0);
-    ++physpages[stack_addr / PAGESIZE].refcount;
+
     ptable[pid].regs.reg_rsp = stack_addr + PAGESIZE;
 
     // mark process as runnable
     ptable[pid].state = P_RUNNABLE;
 }
-
-
 
 // exception(regs)
 //    Exception handler (for interrupts, traps, and faults).
@@ -359,18 +388,30 @@ uintptr_t syscall(regstate* regs) {
 //    should implement the specification for `sys_page_alloc`
 //    in `u-lib.hh` (but in the handout code, it does not).
 
-int syscall_page_alloc(uintptr_t addr) {
-    // Check if the requested address is within the user address space
-    if (addr < PROC_START_ADDR) {
-        return -1; // Invalid address, cannot allocate kernel memory
+int syscall_page_alloc(uintptr_t addr)
+{
+    // Address is not in the process memory and console address
+    if (addr < PROC_START_ADDR && addr != CONSOLE_ADDR)
+    {
+        return -1;
     }
 
-    assert(physpages[addr / PAGESIZE].refcount == 0);
-    ++physpages[addr / PAGESIZE].refcount;
-    memset((void*) addr, 0, PAGESIZE);
+    void *phys = kalloc(PAGESIZE);
+
+    // No physical memory availbale
+    if (phys == nullptr)
+    {
+        return -1;
+    }
+
+    vmiter it(current->pagetable, addr);
+
+    // Map the physical address to this virtual address
+    it.map(phys, PTE_P | PTE_W | PTE_U);
+    memset(phys, 0, PAGESIZE);
+
     return 0;
 }
-
 
 // schedule
 //    Pick the next process to run and then run it.
