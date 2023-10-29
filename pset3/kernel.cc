@@ -321,6 +321,11 @@ void exception(regstate* regs) {
 
 int syscall_page_alloc(uintptr_t addr);
 
+// Added helper functions 
+pid_t sys_fork();
+void syscall_exit(pid_t pid);
+void all_free(x86_64_pagetable *pt);
+
 
 // syscall(regs)
 //    Handle a system call initiated by a `syscall` instruction.
@@ -373,6 +378,9 @@ uintptr_t syscall(regstate* regs) {
     case SYSCALL_PAGE_ALLOC:
         return syscall_page_alloc(current->regs.reg_rdi);
 
+    case SYSCALL_FORK:
+        return sys_fork();
+
     default:
         proc_panic(current, "Unhandled system call %ld (pid=%d, rip=%p)!\n",
                    regs->reg_rax, current->pid, regs->reg_rip);
@@ -382,6 +390,109 @@ uintptr_t syscall(regstate* regs) {
     panic("Should not get here!\n");
 }
 
+pid_t sys_fork()
+{
+    // identify free process 
+    pid_t id_child = 0;
+    for (pid_t i = 1; i < PID_MAX - 1; i++)
+    {
+        if (ptable[i].state == P_FREE)
+        {
+            id_child = i;
+            break;
+        }
+    }
+    // return -1 if no free process ID
+    if (id_child == 0)
+    { 
+        return -1;
+    }
+    // intiializes a new pagetable and ensures there is a spot for it 
+    ptable[id_child].pagetable = kalloc_pagetable();
+    if (ptable[id_child].pagetable == nullptr)       
+    {
+        return -1;
+    }
+
+    // vmiters that go through both parent and child pagetables
+    vmiter p_it(current->pagetable, 0);
+    vmiter c_it(ptable[id_child].pagetable, 0);
+
+    // VAs < start addr must have the page in kernel so we copy over to child 
+    for (; p_it.va() < PROC_START_ADDR; p_it += PAGESIZE, c_it += PAGESIZE)
+    {
+        int result = c_it.try_map(p_it.pa(), p_it.perm());
+        if (result != 0)
+        {
+            all_free(ptable[id_child].pagetable);
+            ptable[id_child].state = P_FREE;
+            return -1;
+        }
+    }
+    for (; p_it.va() < MEMSIZE_VIRTUAL; p_it += PAGESIZE, c_it += PAGESIZE)
+    {
+        if (p_it.user() && p_it.writable()) // if page is not in kernel memory and it is writable
+        {
+            void *new_page = kalloc(PAGESIZE); 
+            if (new_page == nullptr) // new page has space
+            {
+                all_free(ptable[id_child].pagetable);
+                ptable[id_child].state = P_FREE;
+                return -1;
+            }
+            int result = c_it.try_map(new_page, p_it.perm()); // different page for child
+            if (result != 0)
+            {
+                all_free(ptable[id_child].pagetable);
+                ptable[id_child].state = P_FREE;
+                kfree(new_page); // frees if mapping doesn't work
+                return -1;
+            }
+            memcpy(new_page, p_it.kptr(), PAGESIZE); // parent copied --> child
+        }
+        else if (p_it.user() && !p_it.writable())
+        {
+            int result = c_it.try_map(p_it.pa(), p_it.perm()); 
+            if (result != 0)
+            {
+                all_free(ptable[id_child].pagetable);
+                ptable[id_child].state = P_FREE;
+                return -1;
+            }
+            physpages[p_it.pa() / PAGESIZE].refcount++; // memory is shared
+        }
+    }
+    ptable[id_child].regs = current->regs; // copy parent process registers
+    ptable[id_child].regs.reg_rax = 0;    
+    ptable[id_child].state = P_RUNNABLE;
+
+    return ptable[id_child].pid;
+}
+
+void all_free(x86_64_pagetable *pt)
+{ 
+    // free all user accessible mappings but keep console address
+    for (vmiter it(pt, 0); it.va() < MEMSIZE_VIRTUAL; it += PAGESIZE)
+    {
+        if (it.user() && it.va() != CONSOLE_ADDR)
+        {
+            kfree(it.kptr());
+        }
+    }
+    // vm pagetable pages
+    for (ptiter it(pt); !it.done(); it.next())
+    {
+        kfree(it.kptr());
+    }
+    kfree(pt);
+}
+
+void syscall_exit(pid_t pid)
+{
+    // all memory is freed and process is marked as free
+    all_free(ptable[pid].pagetable);
+    ptable[pid].state = P_FREE;
+}
 
 // syscall_page_alloc(addr)
 //    Handles the SYSCALL_PAGE_ALLOC system call. This function
@@ -412,6 +523,8 @@ int syscall_page_alloc(uintptr_t addr)
 
     return 0;
 }
+
+
 
 // schedule
 //    Pick the next process to run and then run it.
