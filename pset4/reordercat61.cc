@@ -40,7 +40,7 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "reordercat61: file too large\n");
         exit(1);
     } else if (nblocks * args.block_size != args.file_size) {
-        fprintf(stderr, "reordercat61: input file size not a multiple of block size\n");
+         fprintf(stderr, "reordercat61: input file size not a multiple of block size\n");
         exit(1);
     }
     std::uniform_int_distribution<size_t> blkdistrib(0, nblocks - 1);
