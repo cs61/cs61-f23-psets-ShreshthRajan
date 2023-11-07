@@ -14,7 +14,7 @@
 struct io61_file
 {
     int fd = -1; // file descriptor 
-    static constexpr off_t bufsize = 8200; // result of trying different buffer sizes
+    static constexpr off_t bufsize = 8192; // result of trying different buffer sizes
     unsigned char bufcache[bufsize];
 
     // "tags" describe cache's content w/ offsets
@@ -257,58 +257,47 @@ ssize_t io61_write(io61_file *f, const unsigned char *buf, size_t sz)
 //    If `f` was opened read-only, `io61_flush(f)` returns 0. It may also
 //    drop any data cached for reading.
 
-int io61_flush(io61_file *f)
-{
+int io61_flush(io61_file *f) {
     // Check invariants.
-    if (!(f->tag <= f->pos_tag && f->pos_tag <= f->end_tag))
-    {
+    if (!(f->tag <= f->pos_tag && f->pos_tag <= f->end_tag)) {
         return -1;
     }
-    if (!(f->end_tag - f->pos_tag <= f->bufsize))
-    {
+    if (!(f->end_tag - f->pos_tag <= f->bufsize)) {
         return -1;
     }
 
     // Cache invariant.
-    if (!(f->pos_tag == f->end_tag))
-    {
+    if (!(f->pos_tag == f->end_tag)) {
         return -1;
     }
 
-    if (f->mode == O_RDONLY)
-    {
+    if (f->mode == O_RDONLY) {
         return 0;
     }
 
-    // From Section */ handle restartable errors via error code
-    int pos = 0;
-    while (pos < (f->pos_tag) - (f->tag))
-    {
-        ssize_t n = write(f->fd, f->bufcache + pos, f->pos_tag - f->tag);
+    // Track the position where the write left off in the cache buffer.
+    size_t pos = 0;
+    
+    while ((long long)pos < (f->pos_tag) - (f->tag)) {
+        ssize_t n = write(f->fd, f->bufcache + pos, f->pos_tag - f->tag - pos);
 
-        if ((errno == EINTR || errno == EAGAIN) && n == -1)
-        {
-            continue; // if restartable errors continue
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN) {
+                continue; // Restartable errors, continue writing.
+            } else {
+                return -1; // Permanent error, return -1.
+            }
         }
+        
         pos += n;
-        if ((size_t)n != (size_t)(f->pos_tag - f->tag)) // didn't fill the whole cache
-        {
-            continue;
-        }
-        // check for permanent errors
-        if (n == 0)
-        { // did not write any bytes
-            return -1;
-        }
-        else if (n == -1)
-        { // write failed
-            return -1;
-        }
-        assert((size_t)n == (size_t)(f->pos_tag - f->tag));
     }
-    f->tag = f->pos_tag;
+
+    // Update the tag to reflect the current position.
+    f->tag += pos;
+
     return 0;
 }
+
 
 // io61_seek(f, pos)
 //    Changes the file pointer for file `f` to `pos` bytes into the file.

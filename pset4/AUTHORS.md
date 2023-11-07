@@ -3,15 +3,14 @@ Author and collaborators
 
 Primary student
 ---------------
-(Your name.)
+Shreshth Rajan
 
 
 Collaborators
 -------------
-(List any other collaborators and describe help you got from other students
-in the class.)
+I attended virtual OH/section
 
 
 Citations
 ---------
-(List any other sources consulted.)
+I attended virtual OH/section. 
