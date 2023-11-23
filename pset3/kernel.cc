@@ -111,7 +111,7 @@ void kernel_start(const char* command) {
 // kalloc(sz)
 //    Kernel physical memory allocator. Allocates at least `sz` contiguous bytes
 //    and returns a pointer to the allocated memory, or `nullptr` on failure.
-//    The returned pointer’s address is a valid physical address, but since the
+//    The returned pointerâ€™s address is a valid physical address, but since the
 //    WeensyOS kernel uses an identity mapping for virtual memory, it is also a
 //    valid virtual address that the kernel can access or modify.
 //
@@ -329,7 +329,7 @@ void all_free(x86_64_pagetable *pt);
 
 // syscall(regs)
 //    Handle a system call initiated by a `syscall` instruction.
-//    The process’s register values at system call time are accessible in
+//    The processâ€™s register values at system call time are accessible in
 //    `regs`.
 //
 //    If this function returns with value `V`, then the user process will
@@ -603,3 +603,4 @@ void memshow() {
             "\n\n\n\n\n\n\n\n\n\n\n");
     }
 }
+
