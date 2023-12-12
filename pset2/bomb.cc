@@ -70,10 +70,10 @@ int main(int argc, char *argv[]) {
     phase_defused();
     printf("PHASE 4 DEFUSED.\n");
 
-    input = read_line();
-    phase5(input);
-    phase_defused();
-    printf("PHASE 5 DEFUSED.\n");
+    // input = read_line();
+    // phase5(input);
+    // phase_defused();
+    // printf("PHASE 5 DEFUSED.\n");
 
     input = read_line();
     phase6(input);
