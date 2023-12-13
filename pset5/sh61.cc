@@ -236,51 +236,49 @@ void run_conditional(command *c)
     }
     c = firstc; // restore the command to the first
 
-    // fork the conditional so we can run many processes together simultaneously we need to
+    // fork the conditional 
     pid_t pa = fork();
     if (pa == 0) // child process
     {
         command *pipelinestart = c; // save the position of the beginning of the pipe
         while (c)
         {
-            while (c->link == TYPE_PIPE) // run through the pipe
+            while (c->link == TYPE_PIPE) 
             {
                 c = c->next;
             }
-            run_pipeline(pipelinestart, c); // run the pipeline from the head
+            run_pipeline(pipelinestart, c); // Run pipeline from the head
 
-            if (c->link == TYPE_SEQUENCE || c->link == TYPE_BACKGROUND) // if it the next argument is running in the background, start running the next pipeline
+            if (c->link == TYPE_SEQUENCE || c->link == TYPE_BACKGROUND) // Check if next argument is running in the pipeline
             {
-                break; // end of statement
+                break; 
             }
-            else if (c->link == TYPE_AND) // check for &&
+            else if (c->link == TYPE_AND) // Checks if prior command is &&
             {
-                // check if command is false
                 if (WIFEXITED(c->wstatus) == 0 || WEXITSTATUS(c->wstatus) != 0)
                 {
                     while (c->link == TYPE_AND)
                     {
-                        c = c->next; // if the status before "and" is false, we skip the next command
+                        c = c->next; 
                     }
                 }
             }
-            else if (c->link == TYPE_OR) // check for ||
+            else if (c->link == TYPE_OR) // Checks if prior command is ||
             {
-                // check if command is true
                 if (WIFEXITED(c->wstatus) && WEXITSTATUS(c->wstatus) == 0)
                 {
                     while (c->link == TYPE_OR)
                     {
-                        c = c->next; // if the status before "or" is true, we skip the next command
+                        c = c->next; 
                     }
                 }
             }
-            c = c->next;       // move to the next conditional statement
-            pipelinestart = c; // move the pipelinestart variable to the start of the next pipe
+            c = c->next;       
+            pipelinestart = c; // move the start var to the next pipe
         }
-        _exit(0); // exit child process
+        _exit(0); 
     }
-    else // in the parent
+    else // in parent
     {
         c->pid = pa;
     }
