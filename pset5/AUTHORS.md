@@ -3,13 +3,12 @@ Author and collaborators
 
 Primary student
 ---------------
-(Your name.)
+Shreshth Rajan
 
 
 Collaborators
 -------------
-(List any other collaborators and describe help you got from other students
-in the class.)
+N/A
 
 
 Citations
