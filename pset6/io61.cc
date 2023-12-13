@@ -6,6 +6,8 @@
 #include <condition_variable>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <map>
+#include <sys/mman.h>
 
 // io61.cc
 //    YOUR CODE HERE!
@@ -13,6 +15,8 @@
 
 // io61_file
 //    Data structure for io61 file wrappers.
+
+int io61_flush_helper(io61_file *f); 
 
 struct io61_file {
     int fd = -1;     // file descriptor
@@ -27,8 +31,14 @@ struct io61_file {
     off_t end_tag;   // offset one past last valid character in `cbuf`
 
     // Positioned mode
-    bool dirty = false;       // has cache been written?
+    std::mutex m;
+    std::condition_variable_any cv;  // intialize cv and m to control locking
+    std::map<off_t, off_t> file_locks;  // map of the rangers of the locks for mmap
+    std::atomic<bool> dirty = false; // has cache been written?
     bool positioned = false;  // is cache in positioned mode?
+    unsigned char *file_data; // pointer that mmap returns
+    size_t file_size; // size of the mmapped file
+    size_t mmap_pos; // offset for the mmap
 };
 
 
@@ -37,24 +47,29 @@ struct io61_file {
 //    O_RDONLY for a read-only file, O_WRONLY for a write-only file,
 //    or O_RDWR for a read/write file.
 
-io61_file* io61_fdopen(int fd, int mode) {
+io61_file *io61_fdopen(int fd, int mode)
+{
     assert(fd >= 0);
-    assert((mode & O_APPEND) == 0);
-    io61_file* f = new io61_file;
+    io61_file *f = new io61_file;
     f->fd = fd;
-    f->mode = mode & O_ACCMODE;
-    off_t off = lseek(fd, 0, SEEK_CUR);
-    if (off != -1) {
-        f->seekable = true;
-        f->tag = f->pos_tag = f->end_tag = off;
-    } else {
-        f->seekable = false;
-        f->tag = f->pos_tag = f->end_tag = 0;
+    f->mode = mode;
+    f->pos_tag = f->end_tag = f->tag = f->mmap_pos = 0;
+    f->file_size = io61_filesize(f); // sets file_size 
+    if (f->file_size != (size_t)-1)
+    {
+        f->file_data = (unsigned char *)mmap(nullptr, f->file_size, PROT_READ, MAP_SHARED, f->fd, 0); // mmap the file
     }
-    f->dirty = f->positioned = false;
+    else
+    {
+        f->file_data = (unsigned char *)MAP_FAILED; // claim that the map failed if file_size = 1
+    }
     return f;
 }
 
+bool lock_overlap(io61_file *f, off_t start, off_t len)
+{
+    return (f->file_locks.lower_bound(start) != f->file_locks.lower_bound(start + len)); // returns true if the range overlaps with previously locked files
+}
 
 // io61_close(f)
 //    Closes the io61_file `f` and releases all its resources.
@@ -75,19 +90,33 @@ int io61_close(io61_file* f) {
 
 static int io61_fill(io61_file* f);
 
-int io61_readc(io61_file* f) {
-    assert(!f->positioned);
-    if (f->pos_tag == f->end_tag) {
-        io61_fill(f);
-        if (f->pos_tag == f->end_tag) {
+int io61_readc(io61_file *f)
+{
+    int ch;
+
+    if (f->file_data != (unsigned char *)MAP_FAILED)
+    {
+        if (f->mmap_pos >= f->file_size)
+        {
+            return -1;
+        }
+        ch = f->file_data[f->mmap_pos];
+        f->mmap_pos += 1;
+        return ch;
+    }
+    if (f->pos_tag == f->end_tag)
+    {
+        int r = io61_fill(f);
+        assert(r != 1);
+        if (f->end_tag == f->pos_tag)
+        {
             return -1;
         }
     }
-    unsigned char ch = f->cbuf[f->pos_tag - f->tag];
-    ++f->pos_tag;
+    ch = f->cbuf[f->pos_tag - f->tag];
+    f->pos_tag++;
     return ch;
 }
-
 
 // io61_read(f, buf, sz)
 //    Reads up to `sz` bytes from `f` into `buf`. Returns the number of
@@ -99,45 +128,68 @@ int io61_readc(io61_file* f) {
 //    if end-of-file or error is encountered before all `sz` bytes are read.
 //    This is called a “short read.”
 
-ssize_t io61_read(io61_file* f, unsigned char* buf, size_t sz) {
-    assert(!f->positioned);
-    size_t nread = 0;
-    while (nread != sz) {
-        if (f->pos_tag == f->end_tag) {
-            int r = io61_fill(f);
-            if (r == -1 && nread == 0) {
-                return -1;
-            } else if (f->pos_tag == f->end_tag) {
+ssize_t io61_read(io61_file *f, unsigned char *buf, size_t sz)
+{
+    if (f->file_data == (unsigned char *)MAP_FAILED)
+    {
+    }
+    else
+    {
+        if (f->mmap_pos >= f->file_size)
+        {
+            return -1;
+        }
+        if (sz + f->mmap_pos > f->file_size)
+        {
+            sz = f->file_size - f->mmap_pos;
+        }
+        memcpy(buf, &f->file_data[f->mmap_pos], sz);
+        f->mmap_pos += sz;
+        return sz;
+    }
+    // Check invariants.
+    assert(f->tag <= f->pos_tag && f->pos_tag <= f->end_tag);
+
+    size_t pos = 0;
+    while (pos < sz)
+    {
+        if (f->pos_tag == f->end_tag)
+        {
+            io61_fill(f);
+            if (f->pos_tag == f->end_tag)
+            {
                 break;
             }
         }
-        size_t nleft = f->end_tag - f->pos_tag;
-        size_t ncopy = std::min(sz - nread, nleft);
-        memcpy(&buf[nread], &f->cbuf[f->pos_tag - f->tag], ncopy);
-        nread += ncopy;
-        f->pos_tag += ncopy;
+
+        // Section leader said to experiment with `memcpy` implementation
+        int mem_size = std::min((int)(f->end_tag - f->pos_tag), (int)(sz - pos)); 
+        memcpy(&buf[pos], &f->cbuf[f->pos_tag - f->tag], mem_size);              
+        f->pos_tag += mem_size;                                                  
+        pos += mem_size;
     }
-    return nread;
+    return pos;
 }
+
 
 
 // io61_writec(f)
 //    Write a single character `c` to `f` (converted to unsigned char).
 //    Returns 0 on success and -1 on error.
 
-int io61_writec(io61_file* f, int c) {
-    assert(!f->positioned);
-    if (f->pos_tag == f->tag + f->cbufsz) {
-        int r = io61_flush(f);
-        if (r == -1) {
-            return -1;
-        }
+int io61_writec(io61_file *f, int ch)
+{
+    unsigned char buf[1];
+    buf[0] = ch;
+    ssize_t nw = io61_write(f, buf, 1); 
+    if (nw == 1)
+    {
+        return 0;
     }
-    f->cbuf[f->pos_tag - f->tag] = c;
-    ++f->pos_tag;
-    ++f->end_tag;
-    f->dirty = true;
-    return 0;
+    else
+    {
+        return -1;
+    }
 }
 
 
@@ -148,15 +200,22 @@ int io61_writec(io61_file* f, int c) {
 //    number of characters written, or -1 if no characters were written
 //    before the error occurred.
 
-ssize_t io61_write(io61_file* f, const unsigned char* buf, size_t sz) {
+ssize_t io61_write(io61_file *f, const unsigned char *buf, size_t sz)
+{
+    std::unique_lock guard(f->m); // coarse grained lock this file
     assert(!f->positioned);
     size_t nwritten = 0;
-    while (nwritten != sz) {
-        if (f->end_tag == f->tag + f->cbufsz) {
-            int r = io61_flush(f);
-            if (r == -1 && nwritten == 0) {
+    while (nwritten != sz)
+    {
+        if (f->end_tag == f->tag + f->cbufsz)
+        {
+            int r = io61_flush_helper(f);
+            if (r == -1 && nwritten == 0)
+            {
                 return -1;
-            } else if (r == -1) {
+            }
+            else if (r == -1)
+            {
                 break;
             }
         }
@@ -184,23 +243,32 @@ static int io61_flush_dirty(io61_file* f);
 static int io61_flush_dirty_positioned(io61_file* f);
 static int io61_flush_clean(io61_file* f);
 
-int io61_flush(io61_file* f) {
+int io61_flush_helper(io61_file *f)
+{
     if (f->dirty && f->positioned) {
         return io61_flush_dirty_positioned(f);
-    } else if (f->dirty) {
+    }
+    else if (f->dirty) {
         return io61_flush_dirty(f);
-    } else {
+    }
+    else {
         return io61_flush_clean(f);
     }
 }
 
+int io61_flush(io61_file *f)
+{
+    std::unique_lock guard(f->m); 
+    return io61_flush_helper(f);  
+}
 
 // io61_seek(f, off)
 //    Changes the file pointer for file `f` to `off` bytes into the file.
 //    Returns 0 on success and -1 on failure.
 
 int io61_seek(io61_file* f, off_t off) {
-    int r = io61_flush(f);
+    std::unique_lock guard(f->m); // coarse grained lock this file
+    int r = io61_flush_helper(f); // doesn't coarse grain lock
     if (r == -1) {
         return -1;
     }
@@ -212,7 +280,6 @@ int io61_seek(io61_file* f, off_t off) {
     f->positioned = false;
     return 0;
 }
-
 
 // Helper functions
 
@@ -234,7 +301,6 @@ static int io61_fill(io61_file* f) {
     f->end_tag += nr;
     return 0;
 }
-
 
 // io61_flush_*(f)
 //    Helper functions for io61_flush.
@@ -285,8 +351,6 @@ static int io61_flush_clean(io61_file* f) {
     return 0;
 }
 
-
-
 // POSITIONED I/O FUNCTIONS
 
 // io61_pread(f, buf, sz, off)
@@ -300,6 +364,7 @@ static int io61_pfill(io61_file* f, off_t off);
 
 ssize_t io61_pread(io61_file* f, unsigned char* buf, size_t sz,
                    off_t off) {
+    std::unique_lock guard(f->m);
     if (!f->positioned || off < f->tag || off >= f->end_tag) {
         if (io61_pfill(f, off) == -1) {
             return -1;
@@ -319,8 +384,12 @@ ssize_t io61_pread(io61_file* f, unsigned char* buf, size_t sz,
 //    This function can only be called when `f` was opened in read/write
 //    more (O_RDWR).
 
+
+static int io61_pfill(io61_file *f, off_t off);
+
 ssize_t io61_pwrite(io61_file* f, const unsigned char* buf, size_t sz,
                     off_t off) {
+    std::unique_lock guard(f->m);
     if (!f->positioned || off < f->tag || off >= f->end_tag) {
         if (io61_pfill(f, off) == -1) {
             return -1;
@@ -367,13 +436,19 @@ static int io61_pfill(io61_file* f, off_t off) {
 //    Returns 0 if the lock was acquired and -1 if it was not. Does not
 //    block: if the lock cannot be acquired, it returns -1 right away.
 
-int io61_try_lock(io61_file* f, off_t start, off_t len, int locktype) {
-    (void) f;
-    assert(start >= 0 && len >= 0);
-    assert(locktype == LOCK_EX || locktype == LOCK_SH);
-    if (len == 0) {
+int io61_try_lock(io61_file *f, off_t start, off_t len, int locktype)
+{
+    assert(locktype);
+    if (len == 0)
+    {
         return 0;
     }
+    std::unique_lock guard(f->m);
+    if (lock_overlap(f, start, len))
+    {
+        return -1;
+    }
+    f->file_locks.insert({start, start + len}); // map tracks what is locked
     return 0;
 }
 
@@ -388,14 +463,15 @@ int io61_try_lock(io61_file* f, off_t start, off_t len, int locktype) {
 //    error conditions, such as EDEADLK (a deadlock was detected).
 
 int io61_lock(io61_file* f, off_t start, off_t len, int locktype) {
-    assert(start >= 0 && len >= 0);
-    assert(locktype == LOCK_EX || locktype == LOCK_SH);
+    assert(locktype);
     if (len == 0) {
         return 0;
     }
-    // The handout code polls using `io61_try_lock`.
-    while (io61_try_lock(f, start, len, locktype) != 0) {
+    std::unique_lock guard(f->m);
+    while (lock_overlap(f, start, len)) {
+        f->cv.wait(guard);
     }
+    f->file_locks.insert({start, start + len}); // map tracks what is beng locked
     return 0;
 }
 
@@ -404,16 +480,20 @@ int io61_lock(io61_file* f, off_t start, off_t len, int locktype) {
 //    Release the lock on offsets `[start,len)` in file `f`.
 //    Returns 0 on success and -1 on error.
 
-int io61_unlock(io61_file* f, off_t start, off_t len) {
-    (void) f;
-    assert(start >= 0 && len >= 0);
-    if (len == 0) {
+int io61_unlock(io61_file *f, off_t start, off_t len)
+{
+    if (len == 0)
+    {
         return 0;
     }
+    std::unique_lock guard(f->m);
+    int r = f->file_locks.erase(start); // remove from map
+    if (r == 0) { 
+        return -1;
+    }
+    f->cv.notify_all(); 
     return 0;
 }
-
-
 
 // HELPER FUNCTIONS
 // You shouldn't need to change these functions.
@@ -424,41 +504,51 @@ int io61_unlock(io61_file* f, off_t start, off_t len) {
 //    standard output, depending on `mode`. Exits with an error message if
 //    `filename != nullptr` and the named file cannot be opened.
 
-io61_file* io61_open_check(const char* filename, int mode) {
+io61_file *io61_open_check(const char *filename, int mode)
+{
     int fd;
-    if (filename) {
+    if (filename)
+    {
         fd = open(filename, mode, 0666);
-    } else if ((mode & O_ACCMODE) == O_RDONLY) {
+    }
+    else if ((mode & O_ACCMODE) == O_RDONLY)
+    {
         fd = STDIN_FILENO;
-    } else {
+    }
+    else
+    {
         fd = STDOUT_FILENO;
     }
-    if (fd < 0) {
+    if (fd < 0)
+    {
         fprintf(stderr, "%s: %s\n", filename, strerror(errno));
         exit(1);
     }
     return io61_fdopen(fd, mode & O_ACCMODE);
 }
 
-
 // io61_fileno(f)
 //    Returns the file descriptor associated with `f`.
 
-int io61_fileno(io61_file* f) {
+int io61_fileno(io61_file *f)
+{
     return f->fd;
 }
-
 
 // io61_filesize(f)
 //    Returns the size of `f` in bytes. Returns -1 if `f` does not have a
 //    well-defined size (for instance, if it is a pipe).
 
-off_t io61_filesize(io61_file* f) {
+off_t io61_filesize(io61_file *f)
+{
     struct stat s;
     int r = fstat(f->fd, &s);
-    if (r >= 0 && S_ISREG(s.st_mode)) {
+    if (r >= 0 && S_ISREG(s.st_mode))
+    {
         return s.st_size;
-    } else {
+    }
+    else
+    {
         return -1;
     }
 }
