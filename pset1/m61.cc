@@ -9,12 +9,14 @@
 #include <map>
 #include <list>
 
+// Struct to store metadata about each allocation.
 struct m61_metadata {
     size_t size;
     const char* file;
     int line;
 };
 
+// Struct to manage a memory buffer for allocations.
 struct m61_memory_buffer {
     char* buffer;
     size_t pos = 0;
@@ -53,11 +55,16 @@ static m61_statistics gstats = {
     .heap_max = 0
 };
 
+// Coalesces adjacent freed memory allocations to optimize heap space usage.
+//
+// This function automatically merges contiguous free blocks within the
+// `freed_allocations` map to reduce memory fragmentation. It plays a
+// vital role in maintaining efficient memory allocation.
+
 static void coalesce_freed_allocations() {
     auto it = freed_allocations.begin();
     while (it != freed_allocations.end()) {
         auto next_it = std::next(it);
-
         if (next_it != freed_allocations.end()) {
             if ((char*)it->first + it->second.size == next_it->first) {
                 it->second.size += next_it->second.size;
@@ -70,6 +77,8 @@ static void coalesce_freed_allocations() {
     }
 }
 
+// Verifies the preservation of active memory allocation contents.
+
 void check_contents_preservation() {
     for (auto it = active_allocations.begin(); it != active_allocations.end(); ++it) {
         char* ptr = (char*)it->first;
@@ -79,6 +88,11 @@ void check_contents_preservation() {
 }
 
 
+/// m61_malloc(sz, file, line)
+///    Returns a pointer to `sz` bytes of freshly-allocated dynamic memory.
+///    The memory is not initialized. If `sz == 0`, then m61_malloc may
+///    return either `nullptr` or a pointer to a unique allocation.
+///    The allocation request was made at source code location `file`:`line`.
 
 void* m61_malloc(size_t sz, const char* file, int line) {
     (void)file, (void)line;
@@ -87,12 +101,14 @@ void* m61_malloc(size_t sz, const char* file, int line) {
     size_t total_size = sizeof(m61_metadata) + sz + padding_size;
 
     if (sz == 0 || total_size < sz || (default_buffer.pos + total_size) < total_size) {
+        // Checks for invalid size parameters and allocates memory accordingly.
         ++gstats.nfail;
         gstats.fail_size += sz;
         return nullptr;
     }
 
     if (default_buffer.pos + total_size > default_buffer.size) {
+        // Verifies available space in the default buffer and handles allocation failures.
         ++gstats.nfail;
         gstats.fail_size += sz;
         return nullptr;
@@ -131,6 +147,13 @@ void* m61_malloc(size_t sz, const char* file, int line) {
     return ptr;
 }
 
+
+/// m61_free(ptr, file, line)
+///    Frees the memory allocation pointed to by `ptr`. If `ptr == nullptr`,
+///    does nothing. Otherwise, `ptr` must point to a currently active
+///    allocation returned by `m61_malloc`. The free was called at location
+///    `file`:`line`.
+
 void m61_free(void* ptr, const char* file, int line) {
     if (ptr == nullptr) {
         return;
@@ -138,6 +161,8 @@ void m61_free(void* ptr, const char* file, int line) {
 
     auto it = active_allocations.find(ptr);
     if (it == active_allocations.end()) {
+        // Checks if the pointer is a valid active allocation.
+        // Handles cases of invalid frees, double frees, and unallocated frees.
         if ((uintptr_t)ptr < (uintptr_t)default_buffer.buffer || (uintptr_t)ptr >= (uintptr_t)default_buffer.buffer + default_buffer.size) {
             fprintf(stderr, "MEMORY BUG: %s:%d: invalid free of pointer %p, not in heap\n", file, line, ptr);
             exit(EXIT_FAILURE);
@@ -170,10 +195,19 @@ void m61_free(void* ptr, const char* file, int line) {
     coalesce_freed_allocations();
 }
 
+
+
+/// m61_calloc(count, sz, file, line)
+///    Returns a pointer a fresh dynamic memory allocation big enough to
+///    hold an array of `count` elements of `sz` bytes each. Returned
+///    memory is initialized to zero. The allocation request was at
+///    location `file`:`line`. Returns `nullptr` if out of memory; may
+///    also return `nullptr` if `count == 0` or `size == 0`.
+
 void* m61_calloc(size_t count, size_t sz, const char* file, int line) {
     size_t total_size = count * sz;
-
     if (count != 0 && sz != 0 && total_size / sz != count) {
+        // Checks for invalid count and sz values that would result in an allocation failure.
         ++gstats.nfail;
         return nullptr;
     }
@@ -185,11 +219,17 @@ void* m61_calloc(size_t count, size_t sz, const char* file, int line) {
     return ptr;
 }
 
+/// m61_get_statistics()
+///    Return the current memory statistics.
+
 m61_statistics m61_get_statistics() {
     return gstats;
 }
 
 
+
+/// m61_print_statistics()
+///    Prints the current memory statistics.
 
 void m61_print_statistics() {
     m61_statistics stats = m61_get_statistics();
@@ -198,6 +238,11 @@ void m61_print_statistics() {
     printf("alloc size:  active %10llu   total %10llu   fail %10llu\n",
            stats.active_size, stats.total_size, stats.fail_size);
 }
+
+
+/// m61_print_leak_report()
+///    Prints a report of all currently-active allocated blocks of dynamic
+///    memory.
 
 void m61_print_leak_report() {
     for (const auto& allocation : active_allocations) {
